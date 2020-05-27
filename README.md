@@ -1,0 +1,2 @@
+# CLBot
+Broodwar API AI
