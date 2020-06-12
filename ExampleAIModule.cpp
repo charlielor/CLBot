@@ -16,7 +16,7 @@ void ExampleAIModule::onStart() {
 	Broodwar->enableFlag(Flag::UserInput);
 
 	// Uncomment the following line and the bot will know about everything through the fog of war (cheat).
-	//Broodwar->enableFlag(Flag::CompleteMapInformation);
+	Broodwar->enableFlag(Flag::CompleteMapInformation);
 
 	// Set the command optimization level so that common commands can be grouped
 	// and reduce the bot's APM (Actions Per Minute).
@@ -69,10 +69,6 @@ void ExampleAIModule::onFrame() {
 	if (Broodwar->getFrameCount() % Broodwar->getLatencyFrames() != 0)
 		return;
 
-	// Unit related stuff
-
-	static int barracks = 0;
-
 	// Iterate through all the units that we own
 	for (auto& u : Broodwar->self()->getUnits()) {
 		// Ignore the unit if it no longer exists
@@ -92,96 +88,122 @@ void ExampleAIModule::onFrame() {
 		if (!u->isCompleted() || u->isConstructing())
 			continue;
 
-		// Finally make the unit do some stuff!
-
-		// If the unit is a worker unit
-		if (u->getType().isWorker()) {
-			// If we don't have a barracks yet, build it
-			static int lastOffensiveBuildingCheck = 0;
-
-			if (barracks < 3 && Broodwar->self()->minerals() >= UnitTypes::Terran_Barracks.mineralPrice() && lastOffensiveBuildingCheck + 500 < Broodwar->getFrameCount()) {
-				lastOffensiveBuildingCheck = Broodwar->getFrameCount();
-				TilePosition buildPosition = Broodwar->getBuildLocation(BWAPI::UnitTypes::Terran_Barracks, u->getTilePosition());
-				u->build(UnitTypes::Terran_Barracks, buildPosition);
-				barracks++;
-			}
-
-			// if our worker is idle
+		switch (u->getType()) {
+		case UnitTypes::Terran_SCV:
+		{
+			// if the SCV is idle, tell it to gather resources
 			if (u->isIdle()) {
-				// Order workers carrying a resource to return them to the center,
-				// otherwise find a mineral patch to harvest.
-				if (u->isCarryingGas() || u->isCarryingMinerals()) {
+				// if the SCV is carrying some resource cargo unit and can return it, return it
+				if ((u->isCarryingGas() || u->isCarryingMinerals()) && u->canReturnCargo()) {
 					u->returnCargo();
-				} else if (!u->getPowerUp())  // The worker cannot harvest anything if it
-				{                             // is carrying a powerup such as a flag
-				  // Harvest from the nearest mineral patch or gas refinery
+				} else if (!u->getPowerUp()) {
+					// gather resource
 					if (!u->gather(u->getClosestUnit(IsMineralField || IsRefinery))) {
-						// If the call fails, then print the last error message
-						Broodwar << Broodwar->getLastError() << std::endl;
+						// Broodwar << Broodwar->getLastError() << std::endl;
 					}
+				}
+			}
+			break;
+		}
+		case UnitTypes::Terran_Command_Center: {
+			// unit radius debug
+			Broodwar->drawCircleMap(Position(u->getPosition()), 250, Colors::Green);
 
-				} // closure: has no powerup
-			} // closure: if idle
-
-		} else if (u->getType().isResourceDepot()) {// A resource depot is a Command Center, Nexus, or Hatchery
-			// Order the depot to construct more workers! But only when it is idle.
-			if (u->isIdle() && !u->train(u->getType().getRace().getWorker())) {
-				// If that fails, draw the error at the location so that you can visibly see what went wrong!
-				// However, drawing the error once will only appear for a single frame
-				// so create an event that keeps it on the screen for some frames
-				Position pos = u->getPosition();
-				Error lastErr = Broodwar->getLastError();
-				Broodwar->registerEvent([pos, lastErr](Game*) { Broodwar->drawTextMap(pos, "%c%s", Text::White, lastErr.c_str()); },   // action
-					nullptr,    // condition
-					Broodwar->getLatencyFrames());  // frames to run
-
-				// Retrieve the supply provider type in the case that we have run out of supplies
+			// Supply check while we're here
+			if (Broodwar->self()->supplyTotal() * 0.85 < Broodwar->self()->supplyUsed()) {
 				UnitType supplyProviderType = u->getType().getRace().getSupplyProvider();
-				static int lastChecked = 0;
+				static int lastSupplyCheck = 0;
 
-				// If we are supply blocked and haven't tried constructing more recently
-				if (lastErr == Errors::Insufficient_Supply &&
-					lastChecked + 400 < Broodwar->getFrameCount() &&
-					Broodwar->self()->incompleteUnitCount(supplyProviderType) == 0) {
-					lastChecked = Broodwar->getFrameCount();
-
+				if (lastSupplyCheck + 400 < Broodwar->getFrameCount() && Broodwar->self()->incompleteUnitCount(supplyProviderType) == 0) {
+					lastSupplyCheck = Broodwar->getFrameCount();
 					// Retrieve a unit that is capable of constructing the supply needed
 					Unit supplyBuilder = u->getClosestUnit(GetType == supplyProviderType.whatBuilds().first &&
 						(IsIdle || IsGatheringMinerals) &&
 						IsOwned);
 					// If a unit was found
 					if (supplyBuilder) {
-						if (supplyProviderType.isBuilding()) {
-							TilePosition targetBuildLocation = Broodwar->getBuildLocation(supplyProviderType, supplyBuilder->getTilePosition());
-							if (targetBuildLocation) {
-								// Register an event that draws the target build location
-								Broodwar->registerEvent([targetBuildLocation, supplyProviderType](Game*) {
-									Broodwar->drawBoxMap(Position(targetBuildLocation),
-										Position(targetBuildLocation + supplyProviderType.tileSize()),
-										Colors::Blue);
-									},
-									nullptr,  // condition
-										supplyProviderType.buildTime() + 100);  // frames to run
+						TilePosition targetBuildLocation = Broodwar->getBuildLocation(supplyProviderType, supplyBuilder->getTilePosition());
+						if (targetBuildLocation) {
+							// Register an event that draws the target build location
+							Broodwar->registerEvent([targetBuildLocation, supplyProviderType](Game*) {
+								Broodwar->drawBoxMap(Position(targetBuildLocation),
+									Position(targetBuildLocation + supplyProviderType.tileSize()),
+									Broodwar->self()->getColor());
+								},
+								nullptr,  // condition
+									supplyProviderType.buildTime() + 100);  // frames to run
 
-								// Order the builder to construct the supply structure
-								supplyBuilder->build(supplyProviderType, targetBuildLocation);
-							}
-						} else {
-							// Train the supply provider (Overlord) if the provider is not a structure
-							supplyBuilder->train(supplyProviderType);
+							// Order the builder to construct the supply structure
+							supplyBuilder->build(supplyProviderType, targetBuildLocation);
 						}
 					}
 				}
 			}
-		} else if (u->getType() == UnitTypes::Terran_Barracks) {
+
+			// see how many mineral patches there are
+			Unitset minerals = u->getUnitsInRadius(250, IsMineralField);
+
+			// see how many refineries there are
+			Unitset refineries = u->getUnitsInRadius(250, IsRefinery);
+
+			// larger radius to account for "base size"
+			Unitset workers = u->getUnitsInRadius(750, IsWorker);
+
+			// if the number of workers we have are less than mineral patches * 3 and refineries * 4, build workers
+			if (
+				workers.size() < (minerals.size() * 3 + refineries.size() * 4)
+				&& u->isIdle()
+				&& !u->train(u->getType().getRace().getWorker())) {
+				// Broodwar << Broodwar->getLastError() << std::endl;
+			}
+
+			static int numberOfBarracks = 0;
+			// Build Barracks
+			if (workers.size() > 9 && numberOfBarracks < 3) {
+				UnitType barracksType = UnitTypes::Terran_Barracks;
+				static int lastBarracksCheck = 0;
+
+				if (lastBarracksCheck + 400 < Broodwar->getFrameCount() && Broodwar->self()->incompleteUnitCount(barracksType) == 0) {
+					lastBarracksCheck = Broodwar->getFrameCount();
+					// Retrieve a unit that is capable of constructing the supply needed
+					Unit builder = u->getClosestUnit(GetType == barracksType.whatBuilds().first &&
+						(IsIdle || IsGatheringMinerals) &&
+						IsOwned);
+					// If a unit was found
+					if (builder) {
+						TilePosition targetBuildLocation = Broodwar->getBuildLocation(UnitTypes::Terran_Barracks, builder->getTilePosition());
+						if (targetBuildLocation) {
+							// Register an event that draws the target build location
+							Broodwar->registerEvent([targetBuildLocation, barracksType](Game*) {
+								Broodwar->drawBoxMap(Position(targetBuildLocation),
+									Position(targetBuildLocation + barracksType.tileSize()),
+									Broodwar->self()->getColor());
+								},
+								nullptr,  // condition
+									barracksType.buildTime() + 100);  // frames to run
+
+							// Order the builder to construct the supply structure
+							builder->build(barracksType, targetBuildLocation);
+							numberOfBarracks++;
+						}
+					}
+				}
+			}
+
+			break;
+		}
+		case UnitTypes::Terran_Barracks:
 			if (u->isIdle() && !u->train(UnitTypes::Terran_Marine)) {
 				u->build(UnitTypes::Terran_Marine);
 			}
-		} else if ((u->getType() == UnitTypes::Terran_Marine) && u->isIdle()) {
+			break;
+		case UnitTypes::Terran_Marine:
 			// cheating
-			u->attack(u->getClosestUnit(IsEnemy));
+			//u->attack(u->getClosestUnit(IsEnemy));
+			break;
+		default:
+			break;
 		}
-
 	} // closure: unit iterator
 }
 
